@@ -30,6 +30,7 @@ type CrosshairConfig struct {
 	Gap              int    `toml:"gap"`
 	OutlineThickness int    `toml:"outline_thickness"`
 	OutlineColor     string `toml:"outline_color"`
+	CustomSVGPath    string `toml:"custom_svg_path,omitempty"`
 }
 
 // PositionConfig contains crosshair positioning settings.
@@ -136,28 +137,54 @@ func (c *Config) Validate() error {
 			c.Crosshair.Shape, strings.Join(ValidShapes, ", ")))
 	}
 
-	if _, err := ParseColor(c.Crosshair.Color); err != nil {
-		errs = append(errs, fmt.Sprintf("invalid color %q: %v", c.Crosshair.Color, err))
-	}
+	if c.Crosshair.Shape == "custom" {
+		if c.Crosshair.CustomSVGPath == "" {
+			errs = append(errs, "custom shape requires custom_svg_path to be set")
+		} else {
+			expanded := c.Crosshair.CustomSVGPath
+			if strings.HasPrefix(expanded, "~") {
+				if home, err := os.UserHomeDir(); err == nil {
+					rest := expanded[1:]
+					if strings.HasPrefix(rest, "/") {
+						expanded = home + rest
+					} else {
+						expanded = filepath.Join(home, rest)
+					}
+				}
+			}
+			c.Crosshair.CustomSVGPath = expanded
 
-	if _, err := ParseColor(c.Crosshair.OutlineColor); err != nil {
-		errs = append(errs, fmt.Sprintf("invalid outline_color %q: %v", c.Crosshair.OutlineColor, err))
+			if !strings.EqualFold(filepath.Ext(expanded), ".svg") {
+				errs = append(errs, "custom_svg_path: file must be a .svg file")
+			}
+			if _, err := os.Stat(expanded); err != nil {
+				errs = append(errs, fmt.Sprintf("custom_svg_path: file not found or not readable: %s", expanded))
+			}
+		}
+	} else {
+		if _, err := ParseColor(c.Crosshair.Color); err != nil {
+			errs = append(errs, fmt.Sprintf("invalid color %q: %v", c.Crosshair.Color, err))
+		}
+
+		if _, err := ParseColor(c.Crosshair.OutlineColor); err != nil {
+			errs = append(errs, fmt.Sprintf("invalid outline_color %q: %v", c.Crosshair.OutlineColor, err))
+		}
+
+		if c.Crosshair.Thickness < 1 || c.Crosshair.Thickness > 100 {
+			errs = append(errs, fmt.Sprintf("thickness must be between 1 and 100 (got %d)", c.Crosshair.Thickness))
+		}
+
+		if c.Crosshair.Gap < 0 || c.Crosshair.Gap > 100 {
+			errs = append(errs, fmt.Sprintf("gap must be between 0 and 100 (got %d)", c.Crosshair.Gap))
+		}
+
+		if c.Crosshair.OutlineThickness < 0 || c.Crosshair.OutlineThickness > 50 {
+			errs = append(errs, fmt.Sprintf("outline_thickness must be between 0 and 50 (got %d)", c.Crosshair.OutlineThickness))
+		}
 	}
 
 	if c.Crosshair.Size < 1 || c.Crosshair.Size > 500 {
 		errs = append(errs, fmt.Sprintf("size must be between 1 and 500 (got %d)", c.Crosshair.Size))
-	}
-
-	if c.Crosshair.Thickness < 1 || c.Crosshair.Thickness > 100 {
-		errs = append(errs, fmt.Sprintf("thickness must be between 1 and 100 (got %d)", c.Crosshair.Thickness))
-	}
-
-	if c.Crosshair.Gap < 0 || c.Crosshair.Gap > 100 {
-		errs = append(errs, fmt.Sprintf("gap must be between 0 and 100 (got %d)", c.Crosshair.Gap))
-	}
-
-	if c.Crosshair.OutlineThickness < 0 || c.Crosshair.OutlineThickness > 50 {
-		errs = append(errs, fmt.Sprintf("outline_thickness must be between 0 and 50 (got %d)", c.Crosshair.OutlineThickness))
 	}
 
 	if c.Position.Monitor < -1 || c.Position.Monitor > 100 {

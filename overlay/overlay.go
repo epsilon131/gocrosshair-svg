@@ -2,7 +2,9 @@ package overlay
 
 import (
 	"fmt"
+	"image"
 	"log"
+	"os"
 
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/shape"
@@ -10,6 +12,9 @@ import (
 
 	"gocrosshair/config"
 )
+
+// logWriter is used for warning output from the overlay package.
+var logWriter = os.Stderr
 
 // Overlay manages the X11 crosshair overlay window.
 type Overlay struct {
@@ -22,6 +27,7 @@ type Overlay struct {
 	monitor   Monitor
 	centerX   int16
 	centerY   int16
+	svgImage  *image.RGBA
 }
 
 // NewOverlay creates a new crosshair overlay connected to the X server.
@@ -152,25 +158,47 @@ func (o *Overlay) createGraphicsContext() error {
 	return nil
 }
 
+// preloadSVG renders the SVG once and caches it for shape and draw calls.
+func (o *Overlay) preloadSVG() {
+	cfg := o.config.Crosshair
+	if cfg.Shape != "custom" {
+		return
+	}
+	img, err := RenderSVG(cfg.CustomSVGPath, cfg.Size)
+	if err != nil {
+		fmt.Fprintf(logWriter, "Warning: could not render SVG %q: %v\n", cfg.CustomSVGPath, err)
+		return
+	}
+	o.svgImage = img
+}
+
 // applyShape configures the window shape for transparency and click-through.
 func (o *Overlay) applyShape() error {
 	cfg := o.config.Crosshair
 
-	shapeRects := GenerateShape(
-		cfg.Shape,
-		o.centerX,
-		o.centerY,
-		int16(cfg.Size),
-		int16(cfg.Thickness),
-		int16(cfg.Gap),
-	)
-
 	var boundingRects []xproto.Rectangle
-	if cfg.OutlineThickness > 0 {
-		outlineRects := GenerateOutline(shapeRects, int16(cfg.OutlineThickness))
-		boundingRects = append(boundingRects, outlineRects...)
+
+	if cfg.Shape == "custom" {
+		if o.svgImage != nil {
+			topLeft := o.svgTopLeft()
+			boundingRects = svgImageToRects(o.svgImage, topLeft[0], topLeft[1])
+		}
+	} else {
+		shapeRects := GenerateShape(
+			cfg.Shape,
+			o.centerX,
+			o.centerY,
+			int16(cfg.Size),
+			int16(cfg.Thickness),
+			int16(cfg.Gap),
+		)
+
+		if cfg.OutlineThickness > 0 {
+			outlineRects := GenerateOutline(shapeRects, int16(cfg.OutlineThickness))
+			boundingRects = append(boundingRects, outlineRects...)
+		}
+		boundingRects = append(boundingRects, shapeRects...)
 	}
-	boundingRects = append(boundingRects, shapeRects...)
 
 	// Set the BOUNDING shape: defines the visible area of the window
 	err := shape.RectanglesChecked(
@@ -203,9 +231,68 @@ func (o *Overlay) applyShape() error {
 	return nil
 }
 
+// svgTopLeft returns the screen coordinates of the SVG image's top-left corner.
+func (o *Overlay) svgTopLeft() [2]int16 {
+	size := int16(o.config.Crosshair.Size)
+	return [2]int16{o.centerX - size/2, o.centerY - size/2}
+}
+
+// putSVGImage sends the RGBA image to the X window using PutImage (ZPixmap).
+// Pixels are converted from RGBA to the X11 BGRX little-endian format.
+func (o *Overlay) putSVGImage(img *image.RGBA, dstX, dstY int16) error {
+	bounds := img.Bounds()
+	w := bounds.Dx()
+	h := bounds.Dy()
+
+	data := make([]byte, w*h*4)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			i := img.PixOffset(x, y)
+			j := (y*w + x) * 4
+			pr, pg, pb := img.Pix[i+0], img.Pix[i+1], img.Pix[i+2]
+			a := img.Pix[i+3]
+			// rasterx writes premultiplied alpha into image.RGBA.
+			// Un-premultiply so the true colour reaches the X11 window.
+			if a == 255 {
+				data[j+0] = pb
+				data[j+1] = pg
+				data[j+2] = pr
+			} else if a > 0 {
+				data[j+0] = byte(int(pb) * 255 / int(a))
+				data[j+1] = byte(int(pg) * 255 / int(a))
+				data[j+2] = byte(int(pr) * 255 / int(a))
+			}
+			data[j+3] = 0 // padding (X11 ZPixmap, not alpha)
+		}
+	}
+
+	return xproto.PutImageChecked(
+		o.conn,
+		xproto.ImageFormatZPixmap,
+		xproto.Drawable(o.windowID),
+		o.gcID,
+		uint16(w), uint16(h),
+		dstX, dstY,
+		0,
+		o.screen.RootDepth,
+		data,
+	).Check()
+}
+
 // drawCrosshair renders the crosshair onto the window.
 func (o *Overlay) drawCrosshair() error {
 	cfg := o.config.Crosshair
+
+	if cfg.Shape == "custom" {
+		if o.svgImage == nil {
+			return nil
+		}
+		topLeft := o.svgTopLeft()
+		if err := o.putSVGImage(o.svgImage, topLeft[0], topLeft[1]); err != nil {
+			fmt.Fprintf(logWriter, "Warning: failed to draw SVG crosshair: %v\n", err)
+		}
+		return nil
+	}
 
 	shapeRects := GenerateShape(
 		cfg.Shape,
@@ -243,6 +330,8 @@ func (o *Overlay) Run() error {
 	if err := o.createGraphicsContext(); err != nil {
 		return err
 	}
+
+	o.preloadSVG()
 
 	if err := o.applyShape(); err != nil {
 		return err

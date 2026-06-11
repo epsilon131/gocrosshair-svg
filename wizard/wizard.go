@@ -3,6 +3,7 @@ package wizard
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -57,6 +58,7 @@ const (
 	stepConfirm
 	stepStartPrompt
 	stepDone
+	stepSVGPath // must stay last; not in sequential iota flow
 )
 
 type Monitor struct {
@@ -82,7 +84,7 @@ type Model struct {
 	width, height  int
 }
 
-var shapeOptions = []string{"cross", "dot", "circle", "cross-dot"}
+var shapeOptions = []string{"cross", "dot", "circle", "cross-dot", "custom"}
 
 var colorPresets = []struct {
 	name  string
@@ -141,13 +143,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleEnter()
 
 		case "esc":
-			if m.step > stepShape {
+			if m.step > stepShape || m.step == stepSVGPath {
+				// stepSVGPath is out-of-band (iota 13), handle it first
+				if m.step == stepSVGPath {
+					m.step = stepShape
+					m.cursor = 0
+					m.err = nil
+					return m, nil
+				}
 				m.step--
 				// Skip thickness and gap when going back for dot/circle shapes
 				if !m.shapeNeedsThicknessAndGap() {
 					if m.step == stepGap || m.step == stepThickness {
 						m.step = stepSize
 						m.textInput.SetValue(strconv.Itoa(m.config.Crosshair.Size))
+						m.textInput.Focus()
+						m.cursor = 0
+						m.err = nil
+						return m, textinput.Blink
+					}
+				}
+				// For custom shape, skip back over steps that were not shown
+				if m.config.Crosshair.Shape == "custom" {
+					if m.step == stepColor {
+						m.step = stepSVGPath
+						m.textInput.SetValue(m.config.Crosshair.CustomSVGPath)
+						m.textInput.CharLimit = 500
+						m.textInput.Width = 60
+						m.textInput.Focus()
+						m.cursor = 0
+						m.err = nil
+						return m, textinput.Blink
+					}
+					if m.step == stepOutlineColor || m.step == stepOutline {
+						m.step = stepSize
+						m.textInput.SetValue(strconv.Itoa(m.config.Crosshair.Size))
+						m.textInput.CharLimit = 20
+						m.textInput.Width = 20
 						m.textInput.Focus()
 						m.cursor = 0
 						m.err = nil
@@ -192,7 +224,10 @@ func (m Model) View() string {
 
 	switch m.step {
 	case stepShape:
-		b.WriteString(m.renderSelect("Select crosshair shape:", shapeOptions))
+		b.WriteString(m.renderShapeSelect())
+
+	case stepSVGPath:
+		b.WriteString(m.renderSVGPathInput())
 
 	case stepColor:
 		b.WriteString(m.renderColorSelect())
@@ -334,14 +369,46 @@ func (m Model) renderNumberInput(title, defaultVal string, minVal, maxVal int) s
 	return b.String()
 }
 
+func (m Model) renderShapeSelect() string {
+	var b strings.Builder
+	b.WriteString(normalStyle.Render("Select crosshair shape:") + "\n\n")
+	for i, opt := range shapeOptions {
+		cursor := "  "
+		style := normalStyle
+		if i == m.cursor {
+			cursor = "▸ "
+			style = selectedStyle
+		}
+		b.WriteString(cursor + style.Render(opt))
+		if opt == "custom" {
+			b.WriteString(dimStyle.Render("  — render a .svg file (set custom_svg_path in config)"))
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func (m Model) renderSVGPathInput() string {
+	var b strings.Builder
+	b.WriteString(normalStyle.Render("Enter path to .svg file:") + "\n\n")
+	b.WriteString("▸ " + m.textInput.View() + "\n")
+	b.WriteString(dimStyle.Render("  (Absolute path or ~/path/to/file.svg)") + "\n")
+	return b.String()
+}
+
 func (m Model) renderConfirm() string {
 	var b strings.Builder
 	b.WriteString(normalStyle.Render("Review your configuration:") + "\n\n")
 
 	cfg := m.config
 	b.WriteString(dimStyle.Render("  Shape:     ") + normalStyle.Render(cfg.Crosshair.Shape) + "\n")
-	b.WriteString(dimStyle.Render("  Color:     ") + normalStyle.Render(cfg.Crosshair.Color) + "\n")
+	if cfg.Crosshair.Shape != "custom" {
+		b.WriteString(dimStyle.Render("  Color:     ") + normalStyle.Render(cfg.Crosshair.Color) + "\n")
+	}
 	b.WriteString(dimStyle.Render("  Size:      ") + normalStyle.Render(fmt.Sprintf("%d px", cfg.Crosshair.Size)) + "\n")
+	if cfg.Crosshair.Shape == "custom" {
+		b.WriteString(dimStyle.Render("  SVG Path:  ") + normalStyle.Render(cfg.Crosshair.CustomSVGPath) + "\n")
+	}
 	// Only show thickness and gap for cross/cross-dot shapes
 	if m.shapeNeedsThicknessAndGap() {
 		b.WriteString(dimStyle.Render("  Thickness: ") + normalStyle.Render(fmt.Sprintf("%d px", cfg.Crosshair.Thickness)) + "\n")
@@ -407,6 +474,8 @@ func (m Model) maxCursor() int {
 		return 2
 	case stepStartPrompt:
 		return 1
+	case stepSVGPath:
+		return 0
 	default:
 		return 0
 	}
@@ -414,7 +483,7 @@ func (m Model) maxCursor() int {
 
 func (m Model) isTextInputStep() bool {
 	switch m.step {
-	case stepSize, stepThickness, stepGap, stepOffsetX, stepOffsetY:
+	case stepSize, stepThickness, stepGap, stepOffsetX, stepOffsetY, stepSVGPath:
 		return true
 	case stepColor, stepOutlineColor:
 		return m.cursor == len(colorPresets)-1
@@ -433,6 +502,15 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	switch m.step {
 	case stepShape:
 		m.config.Crosshair.Shape = shapeOptions[m.cursor]
+		if shapeOptions[m.cursor] == "custom" {
+			m.step = stepSVGPath
+			m.textInput.SetValue("")
+			m.textInput.CharLimit = 500
+			m.textInput.Width = 60
+			m.textInput.Focus()
+			m.cursor = 0
+			return m, textinput.Blink
+		}
 		m.step = stepColor
 		m.cursor = 0
 
@@ -462,6 +540,23 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		m.textInput.Focus()
 		m.err = nil
 
+	case stepSVGPath:
+		path := strings.TrimSpace(m.textInput.Value())
+		if path == "" {
+			m.err = fmt.Errorf("SVG path cannot be empty")
+			return m, nil
+		}
+		if !strings.EqualFold(filepath.Ext(path), ".svg") {
+			m.err = fmt.Errorf("file must have .svg extension")
+			return m, nil
+		}
+		m.config.Crosshair.CustomSVGPath = path
+		m.step = stepSize
+		m.textInput.SetValue("32")
+		m.textInput.CharLimit = 20
+		m.textInput.Width = 20
+		m.err = nil
+
 	case stepSize:
 		val, err := strconv.Atoi(m.textInput.Value())
 		if err != nil || val < 1 || val > 100 {
@@ -469,10 +564,14 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.config.Crosshair.Size = val
-		// Skip thickness and gap for dot/circle shapes
+		// Skip thickness and gap for dot/circle shapes; skip all style steps for custom
 		if m.shapeNeedsThicknessAndGap() {
 			m.step = stepThickness
 			m.textInput.SetValue("2")
+		} else if m.config.Crosshair.Shape == "custom" {
+			m.step = stepMonitor
+			m.cursor = 0
+			m.textInput.Blur()
 		} else {
 			m.step = stepOutline
 			m.cursor = 0

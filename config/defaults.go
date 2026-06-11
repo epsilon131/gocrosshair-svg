@@ -16,7 +16,7 @@ const (
 )
 
 // Valid shape options.
-var ValidShapes = []string{"cross", "dot", "circle", "cross-dot"}
+var ValidShapes = []string{"cross", "dot", "circle", "cross-dot", "custom"}
 
 // Default returns a new Config with default values.
 func Default() *Config {
@@ -43,7 +43,7 @@ func DefaultConfigContent() string {
 	return `# gocrosshair configuration file
 
 [crosshair]
-# Shape of the crosshair: "cross", "dot", "circle", "cross-dot"
+# Shape of the crosshair: "cross", "dot", "circle", "cross-dot", "custom"
 shape = "cross"
 
 # Color in hex format (#RRGGBB, 0xRRGGBB, or RRGGBB)
@@ -61,6 +61,10 @@ gap = 0
 # Outline settings (set outline_thickness to 0 to disable)
 outline_thickness = 0
 outline_color = "#000000"
+
+# shape = "custom" uses a .svg file instead of built-in shapes.
+# When custom is set, thickness, gap, and color have no effect.
+# custom_svg_path = "/home/youruser/.config/gocrosshair/crosshair.svg"
 
 [position]
 # Monitor index (0 = first, 1 = second, etc.)
